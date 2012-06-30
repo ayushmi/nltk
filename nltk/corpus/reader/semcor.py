@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 from api import *
 from util import *
 from xmldocs import *
+from nltk.tree import Tree
 
 class SemcorCorpusReader(XMLCorpusReader):
     """
@@ -29,7 +30,7 @@ class SemcorCorpusReader(XMLCorpusReader):
         XMLCorpusReader.__init__(self, root, fileids)
         self._lazy = lazy
 
-    def words(self, fileids=None, strip_space=True, stem=False):
+    def words(self, fileids=None, strip_space=True):
         """
         :return: the given file(s) as a list of words
             and punctuation symbols.
@@ -37,38 +38,36 @@ class SemcorCorpusReader(XMLCorpusReader):
 
         :param strip_space: If true, then strip trailing spaces from
             word tokens.  Otherwise, leave the spaces on the tokens.
-        :param stem: If true, then use word stems instead of word strings.
         """
-        if self._lazy:
-            return concat([SemcorWordView(fileid, False, None,
-                                       strip_space, stem)
-                           for fileid in self.abspaths(fileids)])
-        else:
-            return concat([self._words(fileid, False, None,
-                                       strip_space, stem)
-                           for fileid in self.abspaths(fileids)])
+        return self._items(fileids, 'word', False, False, False, strip_space)
 
-    def tagged_words(self, fileids=None, sense=False, strip_space=True, stem=False):
+    def chunks(self, fileids=None, strip_space=True):
         """
-        :return: the given file(s) as a list of tagged
-            words and punctuation symbols, encoded as tuples
-            ``(word,tag)``.
-        :rtype: list(tuple(str,str))
+        :return: the given file(s) as a list of chunks, 
+            each of which is a list of words and punctuation symbols 
+            that form a unit.
+        :rtype: list(list(str))
 
-        :param sense: If true, then sense tags will be provided.  
-        Otherwise, part-of-speech tags will be used.
         :param strip_space: If true, then strip trailing spaces from
             word tokens.  Otherwise, leave the spaces on the tokens.
-        :param stem: If true, then use word stems instead of word strings.
         """
-        if sense: tag = 'sense'
-        else: tag = 'pos'
-        if self._lazy:
-            return concat([SemcorWordView(fileid, False, tag, strip_space, stem)
-                           for fileid in self.abspaths(fileids)])
-        else:
-            return concat([self._words(fileid, False, tag, strip_space, stem)
-                           for fileid in self.abspaths(fileids)])
+        return self._items(fileids, 'chunk', False, False, False, strip_space)
+
+    def tagged_chunks(self, fileids=None, tag=('pos' or 'sem' or 'both'), strip_space=True, stem=False):
+        """
+        :return: the given file(s) as a list of tagged
+            chunks, represented in tree form.
+        :rtype: list(Tree)
+
+        :param tag: `'pos'` (part of speech), `'sem'` (semantic), or `'both'` 
+            to indicate the kind of tags to include.  Semantic tags consist of 
+            WordNet lemma IDs, plus the string `'NE'` if the chunk is a named entity 
+            without a specific entry in WordNet.  (For chunks not in WordNet the 
+            semantic tag is `None`).
+        :param strip_space: If true, then strip trailing spaces from
+            word tokens.  Otherwise, leave the spaces on the tokens.
+        """
+        return self._items(fileids, 'chunk', False, tag!='sem', tag!='pos', strip_space)
 
     def sents(self, fileids=None, strip_space=True, stem=False):
         """
@@ -81,15 +80,22 @@ class SemcorCorpusReader(XMLCorpusReader):
             word tokens.  Otherwise, leave the spaces on the tokens.
         :param stem: If true, then use word stems instead of word strings.
         """
-        if self._lazy:
-            return concat([SemcorWordView(fileid, True, None, strip_space, stem)
-                           for fileid in self.abspaths(fileids)])
-        else:
-            return concat([self._words(fileid, True, None, strip_space, stem)
-                           for fileid in self.abspaths(fileids)])
+        return self._items(fileids, 'word', True, False, False, strip_space)
 
-    def tagged_sents(self, fileids=None, c5=False, strip_space=True,
-                     stem=False):
+    def chunk_sents(self, fileids=None, strip_space=True, stem=False):
+        """
+        :return: the given file(s) as a list of
+            sentences or utterances, each encoded as a list of word
+            strings.
+        :rtype: list(list(str))
+
+        :param strip_space: If true, then strip trailing spaces from
+            word tokens.  Otherwise, leave the spaces on the tokens.
+        :param stem: If true, then use word stems instead of word strings.
+        """
+        return self._items(fileids, 'chunk', True, False, False, strip_space)
+
+    def tagged_sents(self, fileids=None, tag=('pos' or 'sem' or 'both'), strip_space=True):
         """
         :return: the given file(s) as a list of
             sentences, each encoded as a list of ``(word,tag)`` tuples.
@@ -101,51 +107,93 @@ class SemcorCorpusReader(XMLCorpusReader):
             word tokens.  Otherwise, leave the spaces on the tokens.
         :param stem: If true, then use word stems instead of word strings.
         """
-        if c5: tag = 'c5'
-        else: tag = 'pos'
-        if self._lazy:
-            return concat([SemcorWordView(fileid, True, tag, strip_space, stem)
-                           for fileid in self.abspaths(fileids)])
-        else:
-            return concat([self._words(fileid, True, tag, strip_space, stem)
-                           for fileid in self.abspaths(fileids)])
+        return self._items(fileids, 'chunk', True, tag!='sem', tag!='pos', strip_space)
 
-    def _words(self, fileid, bracket_sent, tag, strip_space, lemma):
+    def _items(self, fileids, unit, bracket_sent, pos_tag, sem_tag, strip_space):
+        if unit=='word' and not bracket_sent:
+            # the result of the SemcorWordView may be a multiword unit, so the 
+            # LazyConcatenation will make sure the sentence is flattened
+            _ = lambda *args: LazyConcatenation((SemcorWordView if self._lazy else self._words)(*args))
+        else:
+            _ = SemcorWordView if self._lazy else self._words
+        return concat([_(fileid, unit, bracket_sent, pos_tag, sem_tag, strip_space)
+                       for fileid in self.abspaths(fileids)])
+
+    def _words(self, fileid, unit, bracket_sent, pos_tag, sem_tag, strip_space):
         """
         Helper used to implement the view methods -- returns a list of
-        words or a list of sentences, optionally tagged.
+        tokens, (segmented) words, chunks, or sentences. The tokens 
+        and chunks may optionally be tagged (with POS and sense 
+        information).
 
         :param fileid: The name of the underlying file.
+        :param unit: One of `'token'`, `'word'`, or `'chunk'`.
         :param bracket_sent: If true, include sentence bracketing.
-        :param tag: The name of the tagset to use (``"lemma"`` or ``"pos"``), 
-        or None for no tags.
+        :param pos_tag: Whether to include part-of-speech tags.
+        :param sem_tag: Whether to include semantic tags, namely WordNet lemma 
+        and OOV named entity status.
         :param strip_space: If true, strip spaces from word tokens.
-        :param stem: If true, then substitute stems for words.
         """
+        assert unit in ('token', 'word', 'chunk')
         result = []
 
         xmldoc = ElementTree.parse(fileid).getroot()
         for xmlsent in xmldoc.findall('.//s'):
             sent = []
             for xmlword in _all_xmlwords_in(xmlsent):
-                word = xmlword.text
-                if not word:
-                    word = "" # fixes issue 337?
-                if strip_space or stem: word = word.strip()
-                if tag=='sense': word = (word, 
-                	(xmlword.get('lemma', word), # lemma or NE class
-                	 xmlword.get('wnsn', None),  # WordNet sense number
-                	 'rdf' in xmlword.keys()))   # whether this is a named entity
-                elif tag == 'pos':
-                    word = (word, xmlword.get('pos'))	# None for punctuation
-                sent.append(word)
-            if bracket_sent:	# TODO
-                result.append(SemcorSentence(xmlsent.attrib['n'], sent))
+                itm = SemcorCorpusReader._word(xmlword, unit, pos_tag, sem_tag, strip_space)
+                if unit=='word':
+                    sent.extend(itm)
+                else:
+                    sent.append(itm)
+
+            if bracket_sent:
+                result.append(SemcorSentence(xmlsent.attrib['snum'], sent))
             else:
                 result.extend(sent)
 
         assert None not in result
         return result
+
+    @staticmethod
+    def _word(xmlword, unit, pos_tag, sem_tag, strip_space):
+        tkn = xmlword.text
+        if not tkn:
+            tkn = "" # fixes issue 337?
+        if strip_space: tkn = tkn.strip()
+
+        lemma = xmlword.get('lemma', tkn) # lemma or NE class
+        sensenum = xmlword.get('wnsn')  # WordNet sense number
+        isOOVEntity = 'rdf' in xmlword.keys()   # a NE not in WordNet
+        pos = xmlword.get('pos')    # part of speech for the whole chunk (None for punctuation)
+
+        if unit=='token':
+            if not pos_tag and not sem_tag:
+                itm = tkn
+            else:
+                itm = (tkn,) + ((pos,) if pos_tag else ()) + ((lemma, sensenum, isOOVEntity) if sem_tag else ())
+            return itm
+        else:
+            ww = tkn.split('_') # TODO: case where punctuation intervenes in MWE
+            if unit=='word':
+                return ww
+            else:
+                if sensenum is not None:
+                    try:
+                        sense = '%s.%02d' % (lemma, int(sensenum))
+                    except ValueError:
+                        sense = lemma+'.'+sensenum  # e.g. the sense number may be "2;1"
+
+                bottom = [Tree(pos, ww)] if pos_tag else ww
+
+                if sem_tag and isOOVEntity:
+                    return Tree(sense, [Tree('NE', bottom)])
+                elif sem_tag and sensenum is not None:
+                    return Tree(sense, bottom)
+                elif pos_tag:
+                    return bottom[0]
+                else:
+                    return bottom # chunk as a list
 
 def _all_xmlwords_in(elt, result=None):
     if result is None: result = []
@@ -167,85 +215,41 @@ class SemcorWordView(XMLCorpusView):
     """
     A stream backed corpus view specialized for use with the BNC corpus.
     """
-    def __init__(self, fileid, sent, tag, strip_space, stem):
+    def __init__(self, fileid, unit, bracket_sent, pos_tag, sem_tag, strip_space):
         """
         :param fileid: The name of the underlying file.
-        :param sent: If true, include sentence bracketing.
+        :param bracket_sent: If true, include sentence bracketing.
         :param tag: The name of the tagset to use, or None for no tags.
         :param strip_space: If true, strip spaces from word tokens.
         :param stem: If true, then substitute stems for words.
         """
-        if sent: tagspec = '.*/s'
+        if bracket_sent: tagspec = '.*/s'
         else: tagspec = '.*/s/(punc|wf)'
-        self._sent = sent
-        self._tag = tag
+
+        self._unit = unit
+        self._sent = bracket_sent
+        self._pos_tag = pos_tag
+        self._sem_tag = sem_tag
         self._strip_space = strip_space
-        self._stem = stem
 
         XMLCorpusView.__init__(self, fileid, tagspec)
-
-        # Read in a tasty header.
-        #self._open()
-        #self.read_block(self._stream, '.*/teiHeader$', self.handle_header)
-        #self.close()
-
-        # Reset tag context.
-        self._tag_context = {0: ()}
-
-
-	'''
-    title = None #: Title of the document.
-    author = None #: Author of the document.
-    editor = None #: Editor
-    resps = None #: Statement of responsibility
-
-    def handle_header(self, elt, context):
-        # Set up some metadata!
-        titles = elt.findall('titleStmt/title')
-        if titles: self.title = '\n'.join(
-            [title.text.strip() for title in titles])
-
-        authors = elt.findall('titleStmt/author')
-        if authors: self.author = '\n'.join(
-            [author.text.strip() for author in authors])
-
-        editors = elt.findall('titleStmt/editor')
-        if editors: self.editor = '\n'.join(
-            [editor.text.strip() for editor in editors])
-
-        resps = elt.findall('titleStmt/respStmt')
-        if resps: self.resps = '\n\n'.join([
-            '\n'.join([resp_elt.text.strip() for resp_elt in resp])
-            for resp in resps])
-	'''
 
     def handle_elt(self, elt, context):
         if self._sent: return self.handle_sent(elt)
         else: return self.handle_word(elt)
 
     def handle_word(self, elt):
-        word = elt.text
-        if not word:
-            word = "" # fixes issue 337?
-        if self._strip_space or self._stem:
-            word = word.strip()
-        if self._tag == 'sense':
-            word = (word, 
-                	(elt.get('lemma', word), # lemma or NE class
-                	 elt.get('wnsn', None),  # WordNet sense number
-                	 'rdf' in elt.keys()))   # whether this is a named entity
-        elif self._tag == 'pos':
-            word = (word, elt.get('pos'))
-        return word
+        return SemcorCorpusReader._word(elt, self._unit, self._pos_tag, self._sem_tag, self._strip_space)
 
     def handle_sent(self, elt):
         sent = []
         for child in elt:
-            if child.tag == 'mw':
-                sent += [self.handle_word(w) for w in child]
-            elif child.tag in ('wf','punc'):
-                sent.append(self.handle_word(child))
+            if child.tag in ('wf','punc'):
+                itm = self.handle_word(child)
+                if self._unit=='word':
+                    sent.extend(itm)
+                else:
+                    sent.append(itm)
             else:
                 raise ValueError('Unexpected element %s' % child.tag)
-        return SemcorSentence(elt.attrib['n'], sent)
-
+        return SemcorSentence(elt.attrib['snum'], sent)
